@@ -159,7 +159,7 @@ def run_multihead_self_attention(
     mhsa.load_state_dict(
         {"w_q.W": q_proj_weight, "w_k.W": k_proj_weight, "w_v.W": v_proj_weight, "w_o.W": o_proj_weight}
     )
-    return mhsa.forward(in_features)
+    return mhsa(in_features)
 
 
 def run_multihead_self_attention_with_rope(

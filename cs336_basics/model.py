@@ -49,7 +49,7 @@ class RMSNorm(torch.nn.Module):
 
         x = x.to(torch.float32)
         x_2 = x.pow(2)
-        rms = reduce(x_2, "... d_model_squared -> ... 1", "mean")
+        rms = reduce(x_2, "... d_model -> ... 1", "mean")
         rms = rms + self.eps
         rms = rms.sqrt()
         x = x / rms
@@ -66,16 +66,23 @@ class SwiGLU(torch.nn.Module):
         self.w3 = Linear(d_model, d_ff, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = self.w1.forward(x)
+        gate = self.w1(x)
         gate = gate * torch.sigmoid(gate)
-        return self.w2.forward(gate * self.w3.forward(x))
+        return self.w2(gate * self.w3(x))
 
 
 class RotaryPositionalEmbedding(torch.nn.Module):
-    def __init__(self, theta: float, d_k: int, max_seq_len: int, device: torch.device | None = None):
+    def __init__(
+        self,
+        theta: float,
+        d_k: int,
+        max_seq_len: int,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
         super().__init__()
 
-        token_pos_indices = torch.arange(max_seq_len, device=device)[:, None]
+        token_pos_indices = torch.arange(max_seq_len, device=device, dtype=dtype)[:, None]
 
         d_pair_pos = torch.arange(1, d_k // 2 + 1, device=device, dtype=torch.float32)
         d_pair_pos *= 2
@@ -85,7 +92,7 @@ class RotaryPositionalEmbedding(torch.nn.Module):
 
         angle = token_pos_indices / d_pair_pos
 
-        rotation_matrix = torch.ones(max_seq_len, d_k // 2, 2, 2, device=device, dtype=torch.float32)
+        rotation_matrix = torch.ones(max_seq_len, d_k // 2, 2, 2, device=device, dtype=dtype)
         angle = rearrange(angle, "s k_pair -> s k_pair 1 1")
 
         rotation_matrix *= angle
@@ -120,33 +127,32 @@ class MultiHeadSelfAttention(torch.nn.Module):
 
         self.num_heads = num_heads
         self.rope = rope
-        self.device = device
 
-        self.w_q = Linear(d_k * num_heads, d_model, device=device, dtype=dtype)
-        self.w_k = Linear(d_k * num_heads, d_model, device=device, dtype=dtype)
-        self.w_v = Linear(d_v * num_heads, d_model, device=device, dtype=dtype)
-        self.w_o = Linear(d_model, d_v * num_heads, device=device, dtype=dtype)
+        self.w_q = Linear(d_model, d_k * num_heads, device=device, dtype=dtype)
+        self.w_k = Linear(d_model, d_k * num_heads, device=device, dtype=dtype)
+        self.w_v = Linear(d_model, d_v * num_heads, device=device, dtype=dtype)
+        self.w_o = Linear(d_v * num_heads, d_model, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        q = self.w_q.forward(x)
-        k = self.w_k.forward(x)
-        v = self.w_v.forward(x)
+        q = self.w_q(x)
+        k = self.w_k(x)
+        v = self.w_v(x)
 
         seq_len = x.shape[-2]
-        mask = torch.triu(torch.ones(seq_len, seq_len, device=self.device, dtype=torch.bool), diagonal=1)
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
 
         q = rearrange(q, "... seq_len (num_heads d_q) -> ... num_heads seq_len d_q", num_heads=self.num_heads)
         k = rearrange(k, "... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", num_heads=self.num_heads)
         v = rearrange(v, "... seq_len (num_heads d_v) -> ... num_heads seq_len d_v", num_heads=self.num_heads)
 
         if self.rope is not None:
-            pos = torch.arange(seq_len, device=self.device)
-            q = self.rope.forward(q, pos)
-            k = self.rope.forward(k, pos)
+            pos = torch.arange(seq_len, device=x.device)
+            q = self.rope(q, pos)
+            k = self.rope(k, pos)
 
         att = scaled_dot_product_attention(q, k, v, mask)
         att = rearrange(att, "... num_heads seq_len v_d -> ... seq_len (num_heads v_d)")
-        return self.w_o.forward(att)
+        return self.w_o(att)
 
 
 def scaled_dot_product_attention(
@@ -203,7 +209,7 @@ class TransformerLM(torch.nn.Module):
 
         self.embeddings = Embeddings(vocab_size, d_model, device=device, dtype=dtype)
 
-        rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len, device=device)
+        rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len, device=device, dtype=dtype)
 
         self.layers = torch.nn.ModuleList()
         for _ in range(num_layers):
@@ -213,7 +219,7 @@ class TransformerLM(torch.nn.Module):
         self.final_linear = Linear(d_model, vocab_size, device=device, dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        input = self.embeddings.forward(x)
-        for tfer in self.layers:
-            input = tfer.forward(input)
-        return self.final_linear.forward(self.final_norm.forward(input))
+        residual_stream = self.embeddings(x)
+        for layer in self.layers:
+            residual_stream = layer(residual_stream)
+        return self.final_linear(self.final_norm(residual_stream))
