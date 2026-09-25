@@ -300,7 +300,8 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    transformer = TransformerBlock(d_model, num_heads, d_ff, theta, max_seq_len)
+    rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len)
+    transformer = TransformerBlock(d_model, num_heads, d_ff, rope)
     transformer.load_state_dict(
         {
             "attn_pre_norm.gains": weights["ln1.weight"],

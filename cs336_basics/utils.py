@@ -8,5 +8,3 @@ def softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ...
     sums = adjusted_values.sum(dim=dim, keepdim=True)
 
     return adjusted_values / sums
-
-

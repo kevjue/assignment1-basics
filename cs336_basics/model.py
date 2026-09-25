@@ -49,7 +49,7 @@ class RMSNorm(torch.nn.Module):
 
         x = x.to(torch.float32)
         x_2 = x.pow(2)
-        rms = x_2.mean(dim=-1, keepdim=True)
+        rms = reduce(x_2, "... d_model_squared -> ... 1", "mean")
         rms = rms + self.eps
         rms = rms.sqrt()
         x = x / rms
@@ -77,7 +77,7 @@ class RotaryPositionalEmbedding(torch.nn.Module):
 
         token_pos_indices = torch.arange(max_seq_len, device=device)[:, None]
 
-        d_pair_pos = torch.arange(1, d_k // 2 + 1, device=device, dtype=torch.float32)[None, :]
+        d_pair_pos = torch.arange(1, d_k // 2 + 1, device=device, dtype=torch.float32)
         d_pair_pos *= 2
         d_pair_pos -= 2
         d_pair_pos /= d_k
@@ -93,8 +93,6 @@ class RotaryPositionalEmbedding(torch.nn.Module):
         torch.sin_(rotation_matrix[..., 1, 0])
         torch.sin_(rotation_matrix[..., 0, 1]).neg_()
         torch.cos_(rotation_matrix[..., 1, 1])
-
-        print("rotation matrix is ", rotation_matrix)
 
         self.register_buffer("rotation_matrix", rotation_matrix, persistent=False)
 
@@ -122,6 +120,7 @@ class MultiHeadSelfAttention(torch.nn.Module):
 
         self.num_heads = num_heads
         self.rope = rope
+        self.device = device
 
         self.w_q = Linear(d_k * num_heads, d_model, device=device, dtype=dtype)
         self.w_k = Linear(d_k * num_heads, d_model, device=device, dtype=dtype)
@@ -134,14 +133,14 @@ class MultiHeadSelfAttention(torch.nn.Module):
         v = self.w_v.forward(x)
 
         seq_len = x.shape[-2]
-        mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=self.device, dtype=torch.bool), diagonal=1)
 
         q = rearrange(q, "... seq_len (num_heads d_q) -> ... num_heads seq_len d_q", num_heads=self.num_heads)
         k = rearrange(k, "... seq_len (num_heads d_k) -> ... num_heads seq_len d_k", num_heads=self.num_heads)
         v = rearrange(v, "... seq_len (num_heads d_v) -> ... num_heads seq_len d_v", num_heads=self.num_heads)
 
         if self.rope is not None:
-            pos = torch.arange(seq_len)
+            pos = torch.arange(seq_len, device=self.device)
             q = self.rope.forward(q, pos)
             k = self.rope.forward(k, pos)
 
@@ -168,16 +167,13 @@ class TransformerBlock(torch.nn.Module):
         d_model: int,
         num_heads: int,
         d_ff: int,
-        theta: float,
-        max_seq_len: int,
+        rope: RotaryPositionalEmbedding,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
         super().__init__()
 
         self.attn_pre_norm = RMSNorm(d_model, device=device, dtype=dtype)
-
-        rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len)
         self.attn = MultiHeadSelfAttention(d_model, num_heads, rope=rope, device=device, dtype=dtype)
 
         self.mlp_pre_norm = RMSNorm(d_model, device=device, dtype=dtype)
@@ -207,11 +203,11 @@ class TransformerLM(torch.nn.Module):
 
         self.embeddings = Embeddings(vocab_size, d_model, device=device, dtype=dtype)
 
+        rope = RotaryPositionalEmbedding(theta, d_model // num_heads, max_seq_len, device=device)
+
         self.layers = torch.nn.ModuleList()
         for _ in range(num_layers):
-            self.layers.append(
-                TransformerBlock(d_model, num_heads, d_ff, theta, max_seq_len, device=device, dtype=dtype)
-            )
+            self.layers.append(TransformerBlock(d_model, num_heads, d_ff, rope, device=device, dtype=dtype))
 
         self.final_norm = RMSNorm(d_model, device=device, dtype=dtype)
         self.final_linear = Linear(d_model, vocab_size, device=device, dtype=dtype)
